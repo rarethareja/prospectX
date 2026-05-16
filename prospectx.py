@@ -1,32 +1,67 @@
 import requests
 import csv
 import os
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from supabase import create_client
 from dotenv import load_dotenv
 
-# Load credentials
 load_dotenv()
 supabase = create_client(os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_KEY"))
 
 def generate_email(lead):
-    prompt = f"""Write a cold outreach email from a salesperson to a potential client.
+    prompt = f"""You are Alex, a salesperson at ProspectX.
 
-Sender: Alex (a salesperson)
-Recipient: {lead['first_name']}, {lead['job_title']} at {lead['company']} ({lead['industry']} industry)
+ProspectX helps businesses automate their sales outreach using AI — saving hours of manual work and booking more meetings.
 
-Rules:
-- Max 80 words
-- Sound human and direct
-- Reference their industry in line 1
-- One specific question at the end
-- Sign off as Alex
-- No placeholders, no brackets"""
+You are writing a cold email TO a potential client.
+
+THE RECIPIENT IS:
+- Name: {lead['first_name']}
+- Job Title: {lead['job_title']}
+- Company: {lead['company']}
+- Industry: {lead['industry']}
+
+YOU are Alex from ProspectX. THEY are the potential client.
+
+Write the email following these rules:
+- Max 70 words
+- Do NOT say you are from {lead['company']} — you are from ProspectX
+- First line: one specific observation about the {lead['industry']} industry
+- Middle: one sentence on how ProspectX can help them specifically
+- End: one simple question like "Would you be open to a 15 min call?"
+- Sign off as: Alex, ProspectX
+- No brackets, no placeholders, no generic greetings like "I hope this finds you well"
+
+Write the email only. Nothing else."""
 
     response = requests.post(
         "http://localhost:11434/api/generate",
         json={"model": "phi", "prompt": prompt, "stream": False}
     )
-    return response.json()["response"].strip()
+    raw = response.json()["response"].strip()
+    
+    for cutoff in ["Alex, ProspectX", "Alex from ProspectX", "Best regards"]:
+        if cutoff in raw:
+            idx = raw.index(cutoff) + len(cutoff)
+            raw = raw[:idx].strip()
+            break
+    return raw
+
+def send_email(to_email, subject, body):
+    gmail = os.getenv("GMAIL_ADDRESS")
+    password = os.getenv("GMAIL_APP_PASSWORD")
+
+    msg = MIMEMultipart()
+    msg["From"] = gmail
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+        server.login(gmail, password)
+        server.send_message(msg)
 
 
 def process_and_save(csv_file):
@@ -37,10 +72,8 @@ def process_and_save(csv_file):
     for i, lead in enumerate(leads, 1):
         print(f"⏳ Processing {i}/{total}: {lead['first_name']} at {lead['company']}...")
 
-        # Generate email
         email = generate_email(lead)
 
-        # Save to Supabase
         supabase.table("leads").upsert({
             "first_name": lead["first_name"],
             "last_name":  lead.get("last_name", ""),
@@ -48,14 +81,21 @@ def process_and_save(csv_file):
             "company":    lead["company"],
             "job_title":  lead["job_title"],
             "industry":   lead["industry"],
-            "status":     "new",
+            "status":     "contacted",
             "generated_email": email
         }, on_conflict="email").execute()
 
-        print(f"✅ Saved {lead['first_name']} to database")
-        print(f"📧 Email preview: {email[:80]}...\n")
+        # Send the email
+        send_email(
+            to_email=lead["email"],
+            subject=f"Quick idea for {lead['company']}",
+            body=email
+        )
+
+        print(f"✅ Saved & sent to {lead['email']}")
+        print(f"📧 Preview: {email[:80]}...\n")
 
 
 # Run it
 process_and_save("test_leads.csv")
-print("\n🎉 All leads saved to Supabase!")
+print("\n🎉 All done!")
